@@ -8,8 +8,7 @@ setup(
     [
         'Coronado',
         'pika',
-        'EventManagerPlugin',
-        'RabbitMQPlugin'
+        'EventManagerPlugin'
     ],
     author='Mukul Majmudar',
     author_email='mukul@curecompanion.com',

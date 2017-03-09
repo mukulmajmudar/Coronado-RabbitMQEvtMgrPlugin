@@ -1,18 +1,28 @@
 import json
 import logging
+import asyncio
 
-from Coronado.Concurrent import when, transform
 from Coronado.Plugin import AppPlugin as AppPluginBase
-from Coronado.Config import Config as ConfigBase
+from tornado.platform.asyncio import AsyncIOMainLoop
+from tornado.ioloop import IOLoop
 import EventManagerPlugin
-import RabbitMQPlugin
 
 from .RabbitMQClient import RabbitMQClient
+from .Util import when, transform
 
 logger = logging.getLogger(__name__)
 
-class Config(EventManagerPlugin.Config, RabbitMQPlugin.Config):
-    pass
+config = EventManagerPlugin.config
+config.update(
+{
+    'rmqHost': 'localhost',
+    'rmqPort': 5672,
+    'rmqVirtualHost': '/',
+    'rmqUsername': 'guest',
+    'rmqPassword': 'guest',
+    'rmqEnableSSL': False,
+    'rmqSSLOptions': None
+})
 
 
 class AppPlugin(EventManagerPlugin.AppPlugin):
@@ -20,12 +30,22 @@ class AppPlugin(EventManagerPlugin.AppPlugin):
     def getId(self):
         return 'rabbitmqEvtMgrPlugin'
 
+    def start(self, context):
+        # Install asyncio/tornado bridge if not already initialized
+        if not IOLoop.initialized():
+            AsyncIOMainLoop().install()
+
+        super().start(context)
+
+
     def makeEventManager(self):
+        ioloop = self.context.get('ioloop', IOLoop.current())
+
         return EventManager(
                 host=self.context['rmqHost'],
                 port=self.context['rmqPort'],
                 name=self.context['eventManagerName'],
-                ioloop=self.context['ioloop'])
+                ioloop=ioloop)
 
 
 class EventManager(EventManagerPlugin.EventManager):
@@ -33,12 +53,14 @@ class EventManager(EventManagerPlugin.EventManager):
     directExName = None
     client = None
     triggerCapable = None
+    ioloop = None
 
     # pylint: disable=too-many-arguments
     def __init__(self, host, port, name, trigger=True, ioloop=None):
         # Call parent
-        super().__init__(name, ioloop)
+        super().__init__(name)
 
+        self.ioloop = ioloop is not None and ioloop or IOLoop.current()
         self.topicExName = self.name + '-topic'
         self.directExName = self.name + '-direct'
         self.triggerCapable = trigger
@@ -133,11 +155,17 @@ class EventManager(EventManagerPlugin.EventManager):
         contentType, contentEncoding = properties.content_type, \
                 properties.content_encoding
 
+        result = None
         if contentType == 'application/json':
             kwargs = json.loads(body.decode(contentEncoding))
 
             # Call onEvent
-            self._onEvent(consumerTag, **kwargs)
+            result = self._onEvent(consumerTag, **kwargs)
         else:
-            self._onEvent(consumerTag, body=body, contentType=contentType,
-                    contentEncoding=contentEncoding)
+            result = self._onEvent(consumerTag, body=body,
+                    contentType=contentType, contentEncoding=contentEncoding)
+
+        # Schedule coroutine, if any
+        if result is not None:
+            self.ioloop.add_future(asyncio.ensure_future(result),
+                    lambda f: f.result())

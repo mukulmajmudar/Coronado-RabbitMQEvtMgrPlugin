@@ -7,7 +7,7 @@ from pika.spec import BasicProperties
 import tornado.concurrent
 from tornado.ioloop import IOLoop
 
-from Coronado.Concurrent import transform
+from .Util import transform
 
 # Logger for this module
 logger = logging.getLogger(__name__)
