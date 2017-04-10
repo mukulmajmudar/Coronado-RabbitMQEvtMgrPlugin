@@ -1,10 +1,12 @@
 import json
 import logging
 import asyncio
+import concurrent.futures
 
 from Coronado.Plugin import AppPlugin as AppPluginBase
-from tornado.platform.asyncio import AsyncIOMainLoop
+from tornado.platform.asyncio import AsyncIOMainLoop, to_tornado_future
 from tornado.ioloop import IOLoop
+import tornado.concurrent
 import EventManagerPlugin
 
 from .RabbitMQClient import RabbitMQClient
@@ -24,6 +26,8 @@ config.update(
     'rmqSSLOptions': None
 })
 
+futureClasses = (tornado.concurrent.Future, asyncio.Future,
+        concurrent.futures.Future)
 
 class AppPlugin(EventManagerPlugin.AppPlugin):
 
@@ -165,7 +169,14 @@ class EventManager(EventManagerPlugin.EventManager):
             result = self._onEvent(consumerTag, body=body,
                     contentType=contentType, contentEncoding=contentEncoding)
 
-        # Schedule coroutine, if any
-        if result is not None:
-            self.ioloop.add_future(asyncio.ensure_future(result),
-                    lambda f: f.result())
+        # Handle asynchronous code if any
+        if isinstance(result, futureClasses) or asyncio.iscoroutine(result):
+            # Schedule coroutine, if any
+            if asyncio.iscoroutine(result):
+                result = asyncio.ensure_future(result)
+
+            # Convert asyncio future to Tornado future
+            if isinstance(result, asyncio.Future):
+                result = to_tornado_future(result)
+
+            self.ioloop.add_future(result, lambda f: f.result())
