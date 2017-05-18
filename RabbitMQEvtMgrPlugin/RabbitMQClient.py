@@ -1,13 +1,11 @@
 import logging
 from functools import wraps
+import asyncio
 
 import pika
 from pika.adapters import TornadoConnection
 from pika.spec import BasicProperties
-import tornado.concurrent
 from tornado.ioloop import IOLoop
-
-from .Util import transform
 
 # Logger for this module
 logger = logging.getLogger(__name__)
@@ -19,25 +17,24 @@ def connected(method):
     '''
 
     @wraps(method)
-    def wrapper(self, *args, **kwargs):
+    async def wrapper(self, *args, **kwargs):
         # If already connected, call method immediately
         if self._connected:
-            return method(self, *args, **kwargs)
-
-        # Not connected, so connect and then call method
-
-        def onConnected(connectFuture):
-            # Trap connection exceptions if any
-            connectFuture.result()
+            result = method(self, *args, **kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            else:
+                return result
+        else:
+            # Not connected, so connect and then call method
+            await self.connect()
 
             # Call actual method
-            return method(self, *args, **kwargs)
-
-        connectFuture = self.connect()
-        if connectFuture is None:
-            raise ConnectionError()
-
-        return transform(connectFuture, onConnected, ioloop=self._ioloop)
+            result = method(self, *args, **kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            else:
+                return result
 
     return wrapper
 
@@ -50,17 +47,20 @@ class RabbitMQClient(object):
     operations.
     '''
 
+    connectAttempt = None
+
     def __init__(self, host, port, messageHandler=None, ioloop=None):
         self._host = host
         self._port = port
         self._messageHandler = messageHandler
         self._ioloop = ioloop is not None and ioloop or IOLoop.current()
         self._connected = False
+        self.connectAttempt = 0
 
 
     @connected
-    def declareExchange(self, name, exchangeType):
-        declareFuture = tornado.concurrent.Future()
+    async def declareExchange(self, name, exchangeType):
+        declareFuture = asyncio.Future()
         def onExchangeDeclared(frame):  # pylint: disable=unused-argument
             logger.info('Declared RabbitMQ exchange %s of type %s',
                     name, exchangeType)
@@ -74,12 +74,12 @@ class RabbitMQClient(object):
                 exchange_type=exchangeType,
                 durable=True)
 
-        return declareFuture
+        return await declareFuture
 
 
     @connected
-    def declareQueue(self, name):
-        declareFuture = tornado.concurrent.Future()
+    async def declareQueue(self, name):
+        declareFuture = asyncio.Future()
 
         def onQueueDeclared(methodFrame):   # pylint: disable=unused-argument
             queueName = name
@@ -99,12 +99,12 @@ class RabbitMQClient(object):
             # Declare a durable queue
             self._channel.queue_declare(onQueueDeclared, name, durable=True)
 
-        return declareFuture
+        return await declareFuture
 
 
     @connected
-    def bindQueue(self, queueName, exchangeName, key):
-        bindFuture = tornado.concurrent.Future()
+    async def bindQueue(self, queueName, exchangeName, key):
+        bindFuture = asyncio.Future()
 
         def onQueueBound(frame):    # pylint: disable=unused-argument
             logger.info('Bound queue %s to exchange %s',
@@ -116,17 +116,17 @@ class RabbitMQClient(object):
         self._channel.queue_bind(onQueueBound, queueName, exchangeName,
                 key)
 
-        return bindFuture
+        return await bindFuture
 
 
-    def connect(self):
+    async def connect(self):
         logger.info('Connecting to RabbitMQ server')
 
         if self._connectFuture is not None:
             return self._connectFuture
 
         # Make connection
-        self._connectFuture = tornado.concurrent.Future()
+        self._connectFuture = asyncio.Future()
         params = pika.ConnectionParameters(host=self._host, port=self._port)
         self._connection = TornadoConnection(params,
                 on_open_callback=self._onConnected,
@@ -134,15 +134,15 @@ class RabbitMQClient(object):
                 on_close_callback=self._onConnectionClosed,
                 custom_ioloop=self._ioloop)
 
-        return self._connectFuture
+        return await self._connectFuture
 
 
-    def disconnect(self):
+    async def disconnect(self):
         if not self._connected:
             return
-        self._disconnectFuture = tornado.concurrent.Future()
+        self._disconnectFuture = asyncio.Future()
         self._connection.close()
-        return self._disconnectFuture
+        return await self._disconnectFuture
 
 
     @connected
@@ -176,25 +176,35 @@ class RabbitMQClient(object):
         return consumerTag
 
 
-    def stopConsuming(self, consumerTag):
+    async def stopConsuming(self, consumerTag):
         logger.info('Stopping RabbitMQ consumer')
-        stopFuture = tornado.concurrent.Future()
+        stopFuture = asyncio.Future()
         def onCanceled(unused): # pylint: disable=unused-argument
             logger.info('Canceled RabbitMQ consumer')
             stopFuture.set_result(None)
         self._channel.basic_cancel(onCanceled, consumerTag)
-        return stopFuture
+        return await stopFuture
 
 
     def _onConnected(self, connection):
         # Open a channel in the connection
         self._channel = connection.channel(self._onChannel)
+        self.connectAttempt = 0
 
 
     # pylint: disable=unused-argument
     def _onConnectError(self, *args, **kwargs):
-        self._connectFuture.set_exception(ConnectionError())
-        self._connectFuture = None
+        if self.connectAttempt == 10:
+            logger.info('Could not connect to RabbitMQ, will not try ' +
+                'again.')
+            self._connectFuture.set_exception(ConnectionError())
+            self._connectFuture = None
+        else:
+            # Assume RabbitMQ is not up yet, sleep
+            logger.info('Could not connect to RabbitMQ, will try ' +
+                'again after 10 seconds...')
+            self.connectAttempt += 1
+            self._ioloop.call_later(5, self.connect)
 
 
     # pylint: disable=unused-argument

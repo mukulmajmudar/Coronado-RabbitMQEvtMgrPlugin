@@ -39,6 +39,9 @@ class AppPlugin(EventManagerPlugin.AppPlugin):
         if not IOLoop.initialized():
             AsyncIOMainLoop().install()
 
+        if 'ioloop' not in context:
+            context['ioloop'] = IOLoop.current()
+
         super().start(context)
 
 
@@ -80,7 +83,7 @@ class EventManager(EventManagerPlugin.EventManager):
                 self.client.declareExchange(self.directExName, 'direct'))
 
 
-    def on(self, eventType, listener, sourceId=None, listenerId=None):
+    async def on(self, eventType, listener, sourceId=None, listenerId=None):
         # Figure out the exchange and queue names based on whether
         # event type corresponds to a topic or direct exchange
         if sourceId is None:
@@ -90,47 +93,26 @@ class EventManager(EventManagerPlugin.EventManager):
         if listenerId is None:
             logger.info('Automatic queue name for eventType %s', eventType)
             listenerId = ''
-        queueName = [listenerId]
+        queueName = listenerId
 
         # Declare exchange
-        declareXFuture = self.client.declareExchange(exchangeName, exchangeType)
+        await self.client.declareExchange(exchangeName, exchangeType)
 
         # Declare queue
-        declareQFuture = self.client.declareQueue(queueName[0])
+        queueResult = await self.client.declareQueue(queueName)
 
-        def onDeclared(future):
-            # Trap exceptions, if any
-            declareXFuture, declareQFuture = future.result()
-            declareXFuture.result()
-            queueResult = declareQFuture.result()
+        # Bind the queue
+        if queueName == '':
+            queueName = queueResult
+        await self.client.bindQueue(queueName, exchangeName, eventType)
 
-            # Bind the queue
-            if queueName[0] == '':
-                queueName[0] = queueResult
-            queueBindFuture = self.client.bindQueue(
-                    queueName[0], exchangeName, eventType)
+        # Start consuming from the subscriber queue
+        consumerTag = await self.client.startConsuming(queueName)
 
-            return transform(queueBindFuture, onQueueBound, ioloop=self.ioloop)
+        # Associate message handler with consumer tag
+        self._saveHandler(consumerTag, listener)
 
-        def onQueueBound(queueBindFuture):
-            # Trap exceptions, if any
-            queueBindFuture.result()
-
-            # Start consuming from the subscriber queue
-            consumeFuture = self.client.startConsuming(queueName[0])
-
-            return transform(when(consumeFuture), onStartedConsuming)
-
-        def onStartedConsuming(consumeFuture):
-            consumerTag = consumeFuture.result()
-
-            # Associate message handler with consumer tag
-            self._saveHandler(consumerTag, listener)
-
-            return consumerTag
-
-        return transform(when(declareXFuture, declareQFuture),
-                onDeclared, ioloop=self.ioloop)
+        return consumerTag
 
 
     def trigger(self, eventType, **kwargs):
