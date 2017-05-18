@@ -10,7 +10,6 @@ import tornado.concurrent
 import EventManagerPlugin
 
 from .RabbitMQClient import RabbitMQClient
-from .Util import when, transform
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +75,11 @@ class EventManager(EventManagerPlugin.EventManager):
         self.client = RabbitMQClient(host, port, self._onMessage, ioloop)
 
 
-    def start(self):
+    async def start(self):
         if self.triggerCapable:
             # Declare direct and topic exchanges
-            return when(self.client.declareExchange(self.topicExName, 'topic'),
-                self.client.declareExchange(self.directExName, 'direct'))
+            await self.client.declareExchange(self.topicExName, 'topic')
+            await self.client.declareExchange(self.directExName, 'direct')
 
 
     async def on(self, eventType, listener, sourceId=None, listenerId=None):
