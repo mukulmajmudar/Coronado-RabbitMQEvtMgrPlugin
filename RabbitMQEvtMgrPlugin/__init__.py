@@ -114,7 +114,7 @@ class EventManager(EventManagerPlugin.EventManager):
         return consumerTag
 
 
-    def trigger(self, eventType, **kwargs):
+    async def trigger(self, eventType, **kwargs):
         contentType = kwargs.pop('contentType', 'application/json')
         contentEncoding = kwargs.pop('contentEncoding', 'utf-8')
         body = contentType == 'application/json' and \
@@ -125,13 +125,13 @@ class EventManager(EventManagerPlugin.EventManager):
         # publish to the direct exchange
         exchangeName = '.' in eventType and self.topicExName \
                 or self.directExName
-        self.client.publish(exchangeName, eventType, body,
+        await self.client.publish(exchangeName, eventType, body,
                 contentType, contentEncoding)
 
 
-    def off(self, listenerId):
+    async def off(self, listenerTag):
         # Stop consuming
-        return self.client.stopConsuming(listenerId)
+        await self.client.stopConsuming(listenerTag)
 
 
     # pylint: disable=unused-argument

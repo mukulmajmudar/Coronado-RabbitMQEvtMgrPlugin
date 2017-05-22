@@ -147,7 +147,7 @@ class RabbitMQClient(object):
 
     @connected
     # pylint: disable=too-many-arguments
-    def publish(self, exchangeName, routingKey, body,
+    async def publish(self, exchangeName, routingKey, body,
             contentType, contentEncoding):
         # Define properties
         properties = BasicProperties(
